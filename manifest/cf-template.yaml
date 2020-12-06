@@ -1,0 +1,328 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: aws-approve-workflow
+
+Parameters:
+  operatorIAMPassword:
+    Type: String
+    Default: operatorpass0!
+  approverIAMPassword:
+    Type: String
+    Default: approverpass0!
+  bucketName:
+    Type: String
+  dbPassword:
+    Type: String
+    Default: adminpassw0rd
+  snsMailAddress:
+    Type: String
+
+Resources:
+  OperatorUser:
+    Type: AWS::IAM::User
+    Properties:
+      LoginProfile:
+        Password: !Ref operatorIAMPassword
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/ReadOnlyAccess
+      Policies:
+        - PolicyName: ssmPolicy
+          PolicyDocument: {
+            "Version": "2012-10-17",
+            "Statement": [
+                {
+                    "Sid": "operatorPolicy",
+                    "Effect": "Allow",
+                    "Action": [
+                        "ssm:StartAutomationExecution",
+                        "ssm:StartSession"
+                    ],
+                    "Resource": "*"
+                }
+            ]
+          }
+      UserName: operator
+
+  ApproverUser:
+    Type: AWS::IAM::User
+    Properties:
+      LoginProfile:
+        Password: !Ref approverIAMPassword
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/ReadOnlyAccess
+        - arn:aws:iam::aws:policy/AmazonSSMAutomationApproverAccess
+      UserName: approver
+
+  EC2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument: {
+        "Version": "2008-10-17",
+        "Statement": [
+          {
+            "Sid": "",
+            "Effect": "Allow",
+            "Principal": {
+              "Service": "ec2.amazonaws.com"
+            },
+            "Action": "sts:AssumeRole"
+          }
+        ]
+      }
+      ManagedPolicyArns: 
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      RoleName: ec2-role
+ 
+  EC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: "/"
+      Roles:
+      - !Ref EC2Role
+
+  EC2StartLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument: {
+        "Version": "2008-10-17",
+        "Statement": [
+          {
+            "Sid": "",
+            "Effect": "Allow",
+            "Principal": {
+              "Service": "lambda.amazonaws.com"
+            },
+            "Action": "sts:AssumeRole"
+          }
+        ]
+      }
+      ManagedPolicyArns: 
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/AmazonEC2FullAccess
+      RoleName: ec2-start-lambda-role
+
+  EC2EndLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument: {
+        "Version": "2008-10-17",
+        "Statement": [
+          {
+            "Sid": "",
+            "Effect": "Allow",
+            "Principal": {
+              "Service": "lambda.amazonaws.com"
+            },
+            "Action": "sts:AssumeRole"
+          }
+        ]
+      }
+      ManagedPolicyArns: 
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/AmazonEC2FullAccess
+      RoleName: ec2-end-lambda-role
+
+  S3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref bucketName
+  
+  VPC: 
+    Type: AWS::EC2::VPC
+    Properties: 
+      CidrBlock: 10.1.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      InstanceTenancy: default
+      Tags: 
+        - Key: Name
+          Value: workflow-vpc
+
+  InternetGateway: 
+    Type: AWS::EC2::InternetGateway
+    Properties: 
+      Tags: 
+        - Key: Name
+          Value: workflow-igw
+
+  InternetGatewayAttachment: 
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties: 
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref VPC 
+
+  PublicSubnet: 
+    Type: AWS::EC2::Subnet
+    Properties: 
+      AvailabilityZone: ap-northeast-1a
+      CidrBlock: 10.1.0.0/24
+      VpcId: !Ref VPC 
+      Tags: 
+        - Key: Name
+          Value: workflow-public-subnet
+
+  PrivateSubnet1: 
+    Type: AWS::EC2::Subnet
+    Properties: 
+      AvailabilityZone: ap-northeast-1a
+      CidrBlock: 10.1.1.0/24
+      VpcId: !Ref VPC
+      Tags: 
+        - Key: Name
+          Value: workflow-private-subnet1
+
+  PrivateSubnet2: 
+    Type: AWS::EC2::Subnet
+    Properties: 
+      AvailabilityZone: ap-northeast-1a
+      CidrBlock: 10.1.2.0/24
+      VpcId: !Ref VPC
+      Tags: 
+        - Key: Name
+          Value: workflow-private-subnet2
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC 
+      Tags: 
+        - Key: Name
+          Value: workflow-public-route
+
+  PrivateRouteTable: 
+    Type: AWS::EC2::RouteTable
+    Properties: 
+      VpcId: !Ref VPC 
+      Tags: 
+        - Key: Name
+          Value: workflow-private-route
+
+  PublicRoute: 
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway 
+
+  PublicSubnetRouteTableAssociation: 
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: 
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+
+  PrivateSubnet1RouteTableAssociation: 
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: 
+      SubnetId: !Ref PrivateSubnet1
+      RouteTableId: !Ref PrivateRouteTable
+
+  PrivateSubnet2RouteTableAssociation: 
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: 
+      SubnetId: !Ref PrivateSubnet2
+      RouteTableId: !Ref PrivateRouteTable
+
+  SecurityGroupEC2:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: ec2
+      SecurityGroupEgress:
+        - CidrIp: 0.0.0.0/0
+          IpProtocol: tcp
+      VpcId: !Ref VPC 
+
+  SecurityGroupRDS:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: rds
+      SecurityGroupEgress:
+        - CidrIp: 10.1.0.0/24
+          IpProtocol: tcp
+      VpcId: !Ref VPC
+
+  RDS:
+    Type: AWS::RDS::DBInstance
+    Properties: 
+      AllocatedStorage: 20
+      DBInstanceClass: db.t3.micro
+      DBInstanceIdentifier: workflow-rds
+      DBName: workflow-db
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      Engine: mysql
+      EngineVersion: 5.7.31
+      MasterUsername: admin
+      MasterUserPassword: !Ref dbPassword
+      VPCSecurityGroups: !Ref SecurityGroupRDS
+
+  DBSubnetGroup: 
+    Type: AWS::RDS::DBSubnetGroup
+    Properties: 
+      DBSubnetGroupName: rds-subnet"
+      SubnetIds: 
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+
+  SNSTopic:
+    Type: AWS::SNS::Topic
+    Properties: 
+      Subscription: 
+        - Endpoint: !Ref snsMailAddress
+          Protocol: email
+      TopicName: approver-topic
+
+  startEC2Lambda:
+    Type: AWS::Lambda::Function
+    Properties: 
+      FunctionName: start-ec2
+      Handler: lambda_function.lambda_handler
+      Role: !Ref EC2StartLambdaRole
+      Runtime: python3.8
+      Code:
+        ZipFile: !Sub |
+          import boto3
+
+          def lambda_handler(event, context):
+            ec2 = boto3.resource('ec2')
+            instance = ec2.start_instances(
+              ImageId='ami-08847abae18baa040',
+              InstanceType='t2.micro',
+              SecurityGroupIds=[${SecurityGroupRDS}],
+              SubnetId=${PublicSubnet},
+              UserData='sudo yum install -y https://dev.mysql.com/get/mysql80-community-release-el7-3.noarch.rpm;sudo yum-config-manager --disable mysql80-community;sudo yum-config-manager --enable mysql57-community;sudo yum install -y mysql-community-client',
+              IamInstanceProfile={
+                'Arn': ${EC2InstanceProfile}
+              },
+              NetworkInterfaces=[
+                {
+                  'AssociatePublicIpAddress': True
+                }
+              ]
+              TagSpecifications=[
+                {
+                  'Tags': [
+                    {
+                      'Key': 'Name',
+                      'Value': 'operate-ec2'
+                    },
+                  ]
+                },
+              ]
+            )
+            return instance[0].instance_id
+
+  endEC2Lambda:
+    Type: AWS::Lambda::Function
+    Properties: 
+      FunctionName: end-ec2
+      Handler: lambda_function.lambda_handler
+      Role: !Ref EC2EndLambdaRole
+      Runtime: python3.8
+      Code:
+        ZipFile: !Sub |
+          import boto3
+
+          def lambda_handler(event, context):
+            ec2 = boto3.client('ec2')
+            ec2.stop_instances(InstanceIds=event['Records'][0])
+
+          
+

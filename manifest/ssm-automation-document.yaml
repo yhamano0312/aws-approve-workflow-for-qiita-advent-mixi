@@ -1,0 +1,36 @@
+---
+schemaVersion: "0.3"
+description: "ec2 create workflow for rds connect"
+parameters:
+    Description:
+        type: "String"
+        description: "作業内容"
+    StartTime:
+        type: "String"
+        description: "(Required) Start Time that operate(ex: 2020-12-01T09:00:00+09:00)"
+    EndTime:
+        type: "String"
+        description: "(Required) End Time that operate(ex: 2020-12-01T10:00:00+09:00)"
+mainSteps:
+    -
+        action: "aws:approve"
+        name: "approve"
+        inputs:
+            NotificationArn: "{{arn:aws:sns:ap-northeast-1:XXXXXXXXXXXX:approver-topic}}"
+            Message: "Please Approve!"
+            Approvers: "{{arn:aws:iam::XXXXXXXXXXXX:user/approver}}"
+            MinRequiredApprovals: 1
+        onFailure: "Abort"
+
+
+
+    -
+        action: "aws:executeAwsApi"
+        name: "PutInlinepolicy"
+        inputs:
+            Service: "iam"
+            Api: "PutUserPolicy"
+            UserName: "{{IamUserName}}"
+            PolicyName: "AllowAssumePrivilegeRole"
+            PolicyDocument: "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":\"sts:AssumeRole\",\"Resource\":\"{{IamRoleArn}}\",\"Condition\":{\"DateGreaterThan\":{\"aws:CurrentTime\":\"{{StartTime}}\"},\"DateLessThan\":{\"aws:CurrentTime\":\"{{EndTime}}\"}}}]}"
+        isEnd: true
