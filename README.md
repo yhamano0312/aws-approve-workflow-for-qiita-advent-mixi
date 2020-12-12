@@ -1,0 +1,1 @@
+[こちら](https://qiita.com/chanhama/private/8ee3fec7aaf419a159b8)のqiita記事で利用しているマニフェストです。
