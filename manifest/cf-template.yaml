@@ -10,6 +10,9 @@ Parameters:
     Default: approverpass0!
   bucketName:
     Type: String
+  dbUserName:
+    Type: String
+    Default: admin    
   dbPassword:
     Type: String
     Default: adminpassw0rd
@@ -33,8 +36,7 @@ Resources:
                     "Sid": "operatorPolicy",
                     "Effect": "Allow",
                     "Action": [
-                        "ssm:StartAutomationExecution",
-                        "ssm:StartSession"
+                        "ssm:StartAutomationExecution"
                     ],
                     "Resource": "*"
                 }
@@ -69,7 +71,7 @@ Resources:
         ]
       }
       ManagedPolicyArns: 
-        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+        - arn:aws:iam::aws:policy/AmazonSSMFullAccess
       RoleName: ec2-role
  
   EC2InstanceProfile:
@@ -98,6 +100,7 @@ Resources:
       ManagedPolicyArns: 
         - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
         - arn:aws:iam::aws:policy/AmazonEC2FullAccess
+        - arn:aws:iam::aws:policy/IAMFullAccess
       RoleName: ec2-start-lambda-role
 
   EC2EndLambdaRole:
@@ -120,6 +123,29 @@ Resources:
         - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
         - arn:aws:iam::aws:policy/AmazonEC2FullAccess
       RoleName: ec2-end-lambda-role
+
+  StatesExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+                - !Sub states.${AWS::Region}.amazonaws.com
+            Action: "sts:AssumeRole"
+      Path: "/"
+      Policies:
+        - PolicyName: StatesExecutionPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "lambda:InvokeFunction"
+                  - "sns:Publish"
+                Resource: "*"
 
   S3Bucket:
     Type: AWS::S3::Bucket
@@ -173,7 +199,7 @@ Resources:
   PrivateSubnet2: 
     Type: AWS::EC2::Subnet
     Properties: 
-      AvailabilityZone: ap-northeast-1a
+      AvailabilityZone: ap-northeast-1c
       CidrBlock: 10.1.2.0/24
       VpcId: !Ref VPC
       Tags: 
@@ -225,38 +251,41 @@ Resources:
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupName: ec2
+      GroupDescription: ec2
       SecurityGroupEgress:
         - CidrIp: 0.0.0.0/0
-          IpProtocol: tcp
+          IpProtocol: "-1"
       VpcId: !Ref VPC 
 
   SecurityGroupRDS:
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupName: rds
-      SecurityGroupEgress:
+      GroupDescription: rds
+      SecurityGroupIngress:
         - CidrIp: 10.1.0.0/24
-          IpProtocol: tcp
+          IpProtocol: "-1"
       VpcId: !Ref VPC
 
   RDS:
     Type: AWS::RDS::DBInstance
     Properties: 
-      AllocatedStorage: 20
+      AllocatedStorage: "20"
       DBInstanceClass: db.t3.micro
-      DBInstanceIdentifier: workflow-rds
-      DBName: workflow-db
+      DBInstanceIdentifier: workflow
+      DBName: workflow
       DBSubnetGroupName: !Ref DBSubnetGroup
       Engine: mysql
       EngineVersion: 5.7.31
-      MasterUsername: admin
+      MasterUsername: !Ref dbUserName
       MasterUserPassword: !Ref dbPassword
-      VPCSecurityGroups: !Ref SecurityGroupRDS
+      VPCSecurityGroups: [!Ref SecurityGroupRDS]
 
   DBSubnetGroup: 
     Type: AWS::RDS::DBSubnetGroup
     Properties: 
-      DBSubnetGroupName: rds-subnet"
+      DBSubnetGroupName: rds-subnet
+      DBSubnetGroupDescription: rds-subnet
       SubnetIds: 
         - !Ref PrivateSubnet1
         - !Ref PrivateSubnet2
@@ -269,35 +298,42 @@ Resources:
           Protocol: email
       TopicName: approver-topic
 
-  startEC2Lambda:
+  StartEC2Lambda:
     Type: AWS::Lambda::Function
     Properties: 
       FunctionName: start-ec2
-      Handler: lambda_function.lambda_handler
-      Role: !Ref EC2StartLambdaRole
+      Handler: index.lambda_handler
+      Role: !GetAtt EC2StartLambdaRole.Arn
       Runtime: python3.8
+      Timeout: 60
       Code:
         ZipFile: !Sub |
           import boto3
 
           def lambda_handler(event, context):
-            ec2 = boto3.resource('ec2')
-            instance = ec2.start_instances(
+            ec2 = boto3.client('ec2')
+            userdata = """#!/bin/sh
+              instanceid=`curl http://169.254.169.254/latest/meta-data/instance-id`;aws ssm send-command --document-name "AWS-UpdateSSMAgent" --instance-ids "$instanceid" --region ap-northeast-1;sudo yum install -y https://dev.mysql.com/get/mysql80-community-release-el7-3.noarch.rpm;sudo yum-config-manager --disable mysql80-community;sudo yum-config-manager --enable mysql57-community;sudo yum install -y mysql-community-client"""
+            instance = ec2.run_instances(
               ImageId='ami-08847abae18baa040',
               InstanceType='t2.micro',
-              SecurityGroupIds=[${SecurityGroupRDS}],
-              SubnetId=${PublicSubnet},
-              UserData='sudo yum install -y https://dev.mysql.com/get/mysql80-community-release-el7-3.noarch.rpm;sudo yum-config-manager --disable mysql80-community;sudo yum-config-manager --enable mysql57-community;sudo yum install -y mysql-community-client',
+              MinCount=1,
+              MaxCount=1,
+              UserData=userdata,
               IamInstanceProfile={
-                'Arn': ${EC2InstanceProfile}
+                'Arn': '${EC2InstanceProfile.Arn}'
               },
               NetworkInterfaces=[
-                {
-                  'AssociatePublicIpAddress': True
-                }
-              ]
+                  {
+                      'Groups': ['${SecurityGroupEC2}'],
+                      'DeviceIndex': 0,
+                      'AssociatePublicIpAddress': True,
+                      'SubnetId':'${PublicSubnet}'
+                  }
+              ],
               TagSpecifications=[
                 {
+                  'ResourceType': 'instance',
                   'Tags': [
                     {
                       'Key': 'Name',
@@ -307,22 +343,101 @@ Resources:
                 },
               ]
             )
-            return instance[0].instance_id
+            event["instance_id"] = instance['Instances'][0]['InstanceId']
+            return event
 
-  endEC2Lambda:
+  EndEC2Lambda:
     Type: AWS::Lambda::Function
     Properties: 
       FunctionName: end-ec2
-      Handler: lambda_function.lambda_handler
-      Role: !Ref EC2EndLambdaRole
+      Handler: index.lambda_handler
+      Role: !GetAtt EC2EndLambdaRole.Arn
       Runtime: python3.8
+      Timeout: 60
       Code:
-        ZipFile: !Sub |
+        ZipFile: |
           import boto3
 
           def lambda_handler(event, context):
-            ec2 = boto3.client('ec2')
-            ec2.stop_instances(InstanceIds=event['Records'][0])
+            ec2 = boto3.resource('ec2')
+            ec2.instances.filter(InstanceIds = [event["instance_id"]]).terminate()
 
-          
+  StateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties: 
+      RoleArn: !GetAtt StatesExecutionRole.Arn
+      StateMachineName: lambdaExec
+      DefinitionString: !Sub |
+        {
+          "Comment": "lambda exec",
+          "StartAt": "StartWait",
+          "States": {
+            "StartWait": {
+              "Type": "Wait",
+              "TimestampPath": "$.start_time",
+              "Next": "CreateEC2"
+            },
+            "CreateEC2": {
+              "Type": "Task",
+              "Resource": "${StartEC2Lambda.Arn}",
+              "Next": "DeleteWait"
+            },
+            "DeleteWait": {
+              "Type": "Wait",
+              "TimestampPath": "$.end_time",
+              "Next": "DeleteEC2"
+            },
+            "DeleteEC2": {
+              "Type": "Task",
+              "Resource": "${EndEC2Lambda.Arn}",
+              "End": true
+            }
+          }
+        }
 
+  ApproveSSMDocument:
+    Type: AWS::SSM::Document
+    Properties: 
+      DocumentType: Automation
+      Name: approveSSMDocument
+      Content:
+        schemaVersion: "0.3"
+        description: Approve Workflow
+        parameters:
+          StartTime:
+            type: String
+            description: (Required & format:YYYY-MM-DDThh:mm:ss+09:00) Start Time
+            allowedPattern: ^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]\+09:00$
+          EndTime:
+            type: String
+            description: (Required & format:YYYY-MM-DDThh:mm:ss+09:00) End Time
+            allowedPattern: ^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]\+09:00$
+          Description:
+            type: String
+            description: operation description
+        mainSteps:
+          -
+            action: aws:approve
+            name: approve
+            inputs:
+              NotificationArn: !Ref SNSTopic
+              Message: approve check
+              Approvers: 
+                - !GetAtt ApproverUser.Arn
+              MinRequiredApprovals: 1
+            onFailure: Abort
+          -
+            action: aws:executeAwsApi
+            name: putInlinepolicy
+            inputs:
+              Service: iam
+              Api: PutUserPolicy
+              UserName: !Ref OperatorUser
+              PolicyName: AllowSessionManager
+              PolicyDocument: "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":\"ssm:StartSession\",\"Resource\":\"*\",\"Condition\":{\"DateGreaterThan\":{\"aws:CurrentTime\":\"{{StartTime}}\"},\"DateLessThan\":{\"aws:CurrentTime\":\"{{EndTime}}\"}}}]}"
+          -
+            action: aws:executeStateMachine
+            name: execStepFunction
+            inputs:
+              stateMachineArn: !Ref StateMachine
+              input: "{\"start_time\" : \"{{StartTime}}\", \"end_time\" : \"{{EndTime}}\"}"
